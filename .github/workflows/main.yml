@@ -1,0 +1,79 @@
+name: Build PTZR.FORGE
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  macos:
+    name: macOS (VST3 + AU, universal arm64/x86_64)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build VST3 + AU
+        run: cmake --build build --config Release --target PTZRForge_VST3 PTZRForge_AU -j 4
+      - name: Ad-hoc sign (required for Apple Silicon)
+        run: |
+          for b in build/PTZRForge_artefacts/Release/VST3/*.vst3 build/PTZRForge_artefacts/Release/AU/*.component; do
+            codesign --force --deep -s - "$b"
+          done
+      - name: Package
+        run: |
+          mkdir -p dist
+          ditto -c -k --keepParent "build/PTZRForge_artefacts/Release/VST3/PTZR FORGE.vst3" "dist/PTZR-FORGE-macOS-VST3.zip"
+          ditto -c -k --keepParent "build/PTZRForge_artefacts/Release/AU/PTZR FORGE.component" "dist/PTZR-FORGE-macOS-AU.zip"
+      - uses: actions/upload-artifact@v4
+        with: { name: PTZR-FORGE-macOS, path: dist/*.zip }
+
+  windows:
+    name: Windows (VST3)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -S . -B build
+      - run: cmake --build build --config Release --target PTZRForge_VST3 --parallel 4
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path "build/PTZRForge_artefacts/Release/VST3/PTZR FORGE.vst3" -DestinationPath "dist/PTZR-FORGE-Windows-VST3.zip"
+      - uses: actions/upload-artifact@v4
+        with: { name: PTZR-FORGE-Windows, path: dist/*.zip }
+
+  linux:
+    name: Linux (VST3) + DSP tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build pkg-config libasound2-dev libfreetype-dev libx11-dev libxrandr-dev \
+            libxinerama-dev libxcursor-dev libxext-dev libgl1-mesa-dev libfontconfig1-dev
+      - name: DSP unit tests
+        run: g++ -O2 -std=c++17 -I Source/DSP tests/dsp_test.cpp -o dsp_test && ./dsp_test
+      - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build --target PTZRForge_VST3 -j 4
+      - name: Package
+        run: |
+          mkdir -p dist
+          (cd build/PTZRForge_artefacts/Release/VST3 && zip -qr "$GITHUB_WORKSPACE/dist/PTZR-FORGE-Linux-VST3.zip" "PTZR FORGE.vst3")
+      - uses: actions/upload-artifact@v4
+        with: { name: PTZR-FORGE-Linux, path: dist/*.zip }
+
+  release:
+    name: Publish release (on tag vX.Y.Z)
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [ macos, windows, linux ]
+    runs-on: ubuntu-latest
+    permissions: { contents: write }
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: dist, merge-multiple: true }
+      - uses: softprops/action-gh-release@v2
+        with: { files: dist/*.zip }
